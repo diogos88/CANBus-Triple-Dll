@@ -10,19 +10,14 @@ namespace CanBusTriple
         protected CBTSerial Serial;
 
         #region Properties
-        public event CanMessageReceivedHandler CanMessageReceived {
+        public event CBTSerial.CanMessageReceivedHandler CanMessageReceived {
             add { Serial.CanMessageReceived += value; }
             remove { Serial.CanMessageReceived -= value; }
         }
 
-        public event PortStatusHandler PortStatusChanged {
+        public event CBTSerial.PortStatusHandler PortStatusChanged {
             add { Serial.PortStatusChanged += value; }
             remove { Serial.PortStatusChanged -= value; }
-        }
-
-        public event DebugHandler Debug {
-            add { Serial.Debug += value; }
-            remove { Serial.Debug -= value; }
         }
 
         public bool Connected => Serial.IsOpen;

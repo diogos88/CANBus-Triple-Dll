@@ -64,7 +64,6 @@ namespace CanBusTriple
         #endregion
 
         #region Can commands
-        //public static byte[] CanPacket(int bus, byte[] msgId, byte[] data) {
         public static byte[] CanPacket(CanMessage msg) {
             if (msg.Bus < 1 || msg.Bus > MAX_BUS) throw new Exception("Invalid Bus");
             if (msg.Id > 0xFFF || msg.Id <= 0) throw new Exception("Invalid can identifier");
@@ -107,7 +106,7 @@ namespace CanBusTriple
             if (bus < 1 || bus > MAX_BUS) throw new Exception("Invalid Bus");
             if (msgFilter1 > 65535 || msgFilter2 > 65535) throw new Exception("Invalid filters");
             if (mask1 > 65535 || mask2 > 65535) throw new Exception("Invalid masks");
-            var cmd = new byte[11];
+            byte[] cmd = new byte[11];
             cmd[0] = CMD_LOG;
             cmd[1] = (byte)bus;
             cmd[2] = 2;

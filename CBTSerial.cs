@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Newtonsoft.Json;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -6,42 +7,11 @@ using System.IO;
 using System.IO.Ports;
 using System.Linq;
 using System.Runtime.ExceptionServices;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
 
 namespace CanBusTriple
 {
-    public delegate void PortStatusHandler(bool isOpen);
-    public delegate void CanMessageReceivedHandler(CanMessage msg);
-    public delegate void DebugHandler(string info);
-
-    public struct CanMessage
-    {
-        public int Bus;
-        public int Id;
-        public byte[] Data;
-        public DateTime DateTime;
-        /**
-         * Status contains information about the two receive buffers of MCP2515 chip
-         * 01 -> Message received on buffer 1
-         * 02 -> Message received on buffer 2
-         * 03 -> Messages received on both buffers
-         * */
-        public int Status { get; set; }
-
-        public string HexId => $"0x{Id:X3}";
-
-        public string HexData {
-            get {
-                return Data.Aggregate("0x", (current, b) => current + $"{b:X2}");
-            }
-        }
-
-        public string Time => DateTime.ToString("HH:mm:ss.fff");
-    }
-
     public class CBTSerial
     {
         public const int BAUD_RATE = 115200;
@@ -58,9 +28,11 @@ namespace CanBusTriple
         private bool? _resultReceived;
         private string _lineReceived;
 
+        public delegate void PortStatusHandler(bool isOpen);
         public event PortStatusHandler PortStatusChanged;
+
+        public delegate void CanMessageReceivedHandler(CanMessage msg);
         public event CanMessageReceivedHandler CanMessageReceived;
-        public event DebugHandler Debug;
 
         public bool Busy { get; private set; }
 
@@ -81,7 +53,7 @@ namespace CanBusTriple
         {
             if (_port.IsOpen) return;
             _port.Open();
-            ResetCancelToken();
+            _cancelRead = new CancellationTokenSource();
             _bgWorker = new BackgroundWorker {WorkerSupportsCancellation = true};
             _bgWorker.DoWork += async (sender, e) => { 
                 while(!_bgWorker.CancellationPending) await DetectPacket();
@@ -128,7 +100,7 @@ namespace CanBusTriple
             var wasOpen = _port.IsOpen;
             try {
                 if (!wasOpen) OpenPort();                
-                await WriteBytes(cmd);
+                await _port.BaseStream.WriteAsync(cmd, 0, cmd.Length);
                 // Waits for writing completed
                 while (_port.BytesToWrite > 0) await Task.Delay(50);       
             }
@@ -148,7 +120,7 @@ namespace CanBusTriple
             try {
                 if (!wasOpen) OpenPort();
                 _jsonReceived = null;
-                await WriteBytes(cmd);
+                await _port.BaseStream.WriteAsync(cmd, 0, cmd.Length);
                 var timeout = READ_TIMEOUT;
                 while (_jsonReceived == null && timeout > 0) {
                     await Task.Delay(20);
@@ -174,7 +146,7 @@ namespace CanBusTriple
             try {
                 if (!wasOpen) OpenPort();
                 _resultReceived = null;
-                await WriteBytes(cmd);
+                await _port.BaseStream.WriteAsync(cmd, 0, cmd.Length);
                 var timeout = READ_TIMEOUT;
                 while (_resultReceived == null && timeout > 0) {
                     await Task.Delay(20);
@@ -202,7 +174,7 @@ namespace CanBusTriple
                 _lineReceived = null;
                 _jsonReceived = null;
                 _resultReceived = null;
-                await WriteBytes(cmd);
+                await _port.BaseStream.WriteAsync(cmd, 0, cmd.Length);
                 var timeout = READ_TIMEOUT;
                 while (_lineReceived == null && _jsonReceived == null && _resultReceived == null && timeout > 0) {
                     await Task.Delay(20);
@@ -223,22 +195,23 @@ namespace CanBusTriple
             return _lineReceived;
         }
 
-        private void ResetCancelToken()
-        {
-            _cancelRead = new CancellationTokenSource();
-            _cancelRead.Token.Register(ResetCancelToken);
-        }
-
         private async Task DetectPacket()
         {
+            if (_cancelRead.IsCancellationRequested) {
+                _cancelRead = new CancellationTokenSource();
+                return;
+            }
             var buf = new byte[10];
             try {
-                if (!_port.IsOpen) return;                
                 var bytesRead = await _port.BaseStream.ReadAsync(buf, 0, 1, _cancelRead.Token);                
                 if (bytesRead == 0) return;
             }
+            catch (TaskCanceledException) {
+                _cancelRead = new CancellationTokenSource();
+                return;
+            }
             catch (Exception ex) {
-                if (ex is TaskCanceledException || ex is IOException || ex is TimeoutException) return;
+                if (ex is IOException || ex is TimeoutException) return;
                 throw;
             }
 
@@ -249,29 +222,22 @@ namespace CanBusTriple
 
                 case 0x7B: // Json message ('{')
                     var str = _port.ReadTo("}\r\n");
-                    Debug?.Invoke("<- {" + str + "}");
                     _jsonReceived = JsonConvert.DeserializeObject<Dictionary<string, string>>("{" + str + "}");
                     break;
 
                 case 0xFF: // OK message (COMMAND_OK)
-                    Debug?.Invoke("<- COMMAND_OK");
-                    try {
-                        // Discard two next bytes (line terminator)
-                        var buff = new byte[2];
-                        await _port.BaseStream.ReadAsync(buff, 0, 2, _cancelRead.Token);                       
-                    }
-                    catch (TaskCanceledException) {}
+                    // Discard two next bytes (line terminator)
+                    var buff = new byte[2];
+                    await _port.BaseStream.ReadAsync(buff, 0, 2, _cancelRead.Token);
                     _resultReceived = true;
                     break;
 
                 case 0x80: // Error message (COMMAND_ERROR)
-                    Debug?.Invoke("<- COMMAND_ERROR");
                     _resultReceived = false;
                     break;
 
                 default: // Read a line
                     _lineReceived = ((char)buf[0]) + _port.ReadLine();
-                    Debug?.Invoke(Encoding.ASCII.GetBytes(_lineReceived).Aggregate("<-", (st, el) => st + $" {el:X2}"));
                     break;
             }            
         }
@@ -279,18 +245,12 @@ namespace CanBusTriple
         private async Task ReadCanMessage(DateTime timestamp)
         {
             int bytesToRead, bytesRead;
-            do {                
-                try {
-                    bytesToRead = _canBuf.Length - _canRead;
-                    bytesRead = await _port.BaseStream.ReadAsync(_canBuf, _canRead, bytesToRead, _cancelRead.Token);
-                }
-                catch (TaskCanceledException) {
-                    return;
-                }
+            do {
+                bytesToRead = _canBuf.Length - _canRead;
+                bytesRead = await _port.BaseStream.ReadAsync(_canBuf, _canRead, bytesToRead, _cancelRead.Token);
                 if (bytesRead == bytesToRead) {
                     // Read completed
                     _canRead = 0;
-                    Debug?.Invoke(_canBuf.Aggregate("<- CAN", (str, el) => str + $" {el:X2}"));
                     if (CanMessageReceived == null) continue;
                     var msg = new CanMessage {
                         Bus = _canBuf[0],
@@ -308,12 +268,6 @@ namespace CanBusTriple
                 }
             }
             while (bytesRead < bytesToRead);
-        }
-
-        private async Task WriteBytes(byte[] bytes)
-        {
-            await _port.BaseStream.WriteAsync(bytes, 0, bytes.Length);
-            Debug?.Invoke(bytes.Aggregate("->", (str, el) => str + $" {el:X2}"));
         }
     }
 }
