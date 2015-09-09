@@ -13,25 +13,26 @@ namespace CanBusTriple
         public event CBTSerial.CanMessageReceivedHandler CanMessageReceived;
         private readonly MicroTimer _timer;
         private readonly Random _rnd;
-        private int _counter;
 
         private DateTime _startTime;
         private Stopwatch _stopwatch;
 
         public FakeCBT(string portName = null)
         {
+            _stopwatch = new Stopwatch();
             _rnd = new Random();
             _timer = new MicroTimer(1000);
             _timer.MicroTimerElapsed += (s, args) =>
             {
                 if (CanMessageReceived == null) return;
+
                 // Generate random Can Message
                 var msg = new CanMessage
                 {
-                    Bus = 1,
-                    Id = _rnd.Next(0x000, 0x19E), //_rnd.Next(1, 0xFFF),
+                    Bus = _rnd.Next(1, 3),
+                    Id = _rnd.Next(0x294, 0x2A1),
                     Status = _rnd.Next(0, 3),
-                    Data = BitConverter.GetBytes(++_counter),
+                    Data = new byte[] { (byte)_rnd.Next(0x00, 0xFF), (byte)_rnd.Next(0x00, 0xFF), (byte)_rnd.Next(0x00, 0xFF), (byte)_rnd.Next(0x00, 0xFF), (byte)_rnd.Next(0x00, 0xFF), (byte)_rnd.Next(0x00, 0xFF), (byte)_rnd.Next(0x00, 0xFF), (byte)_rnd.Next(0x00, 0xFF) },
                     DateTime = _startTime + _stopwatch.Elapsed
                 };
                 CanMessageReceived(msg);
